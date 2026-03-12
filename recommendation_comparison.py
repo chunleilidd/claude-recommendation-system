@@ -10,12 +10,24 @@ Algorithm:
     - best_taste_score(o, S) = max over all tastes t in system S of match(t, o)
   system_score(S) = sum(w_o * best_taste_score(o, S)) / sum(w_o)
 
-Usage:
+Usage (original .md + Chunlei orders):
   python recommendation_comparison.py
+
+Usage (carousels CSV + Natalie orders, day_part required):
+  python recommendation_comparison.py \\
+      --carousels-csv "Natalie Sample Carousels - Full_data.csv" \\
+      --orders-csv Natalie-orders.csv \\
+      --day-part weekday_lunch
+
+  Valid day_part values:
+    weekday_breakfast, weekday_lunch, weekday_dinner, weekday_late_night,
+    weekend_breakfast, weekend_lunch, weekend_dinner, weekend_late_night,
+    breakfast, lunch, dinner, all   (legacy hour-only values)
 
 No third-party dependencies required (uses stdlib only).
 """
 
+import argparse
 import csv
 import json
 import math
@@ -98,6 +110,65 @@ class SystemResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. PARSING
 # ─────────────────────────────────────────────────────────────────────────────
+
+def parse_carousels_csv(filepath: str, day_part: str) -> List[RecommendationSystem]:
+    """
+    Parse the carousel recommendations CSV for a specific day_part.
+
+    Relevant columns: DAY_PART, CAROUSEL_RANK,
+      SYSTEM_A_TITLE, SYSTEM_A_METADATA,
+      SYSTEM_B_TITLE, SYSTEM_B_METADATA,
+      SYSTEM_C_TITLE, SYSTEM_C_METADATA
+
+    SYSTEM_X_TITLE  → taste_name
+    SYSTEM_X_METADATA → JSON with cuisine_type and food_type
+    CAROUSEL_RANK   → rank (1 = most recommended)
+
+    Returns three RecommendationSystem objects (A, B, C) sorted by rank.
+    """
+    system_tastes: Dict[str, List[TasteEntry]] = {"A": [], "B": [], "C": []}
+
+    with open(filepath, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["DAY_PART"].strip() != day_part:
+                continue
+            try:
+                rank = int(row["CAROUSEL_RANK"].strip())
+            except ValueError:
+                continue
+
+            for sys_key in ("A", "B", "C"):
+                title = row.get(f"SYSTEM_{sys_key}_TITLE", "").strip()
+                meta_str = row.get(f"SYSTEM_{sys_key}_METADATA", "").strip()
+                if not title:
+                    continue
+                try:
+                    meta = json.loads(meta_str)
+                except (json.JSONDecodeError, ValueError):
+                    meta = {}
+                system_tastes[sys_key].append(TasteEntry(
+                    rank=rank,
+                    taste_name=title,
+                    cuisine_types=meta.get("cuisine_type", []),
+                    food_types=meta.get("food_type", []),
+                ))
+
+    systems = []
+    for sys_key in ("A", "B", "C"):
+        tastes = sorted(system_tastes[sys_key], key=lambda t: t.rank)
+        if tastes:
+            systems.append(RecommendationSystem(name=sys_key, tastes=tastes))
+
+    if not systems:
+        raise ValueError(
+            f"No recommendations found for day_part='{day_part}' in '{filepath}'.\n"
+            f"Available day_part values can be inspected by running:\n"
+            f"  python -c \"import csv; r=csv.DictReader(open('{filepath}')); "
+            f"print(sorted(set(row['DAY_PART'] for row in r)))\""
+        )
+    return systems
+
 
 def parse_md(filepath: str) -> List[RecommendationSystem]:
     """
@@ -219,12 +290,27 @@ def parse_csv(filepath: str) -> Tuple[List[OrderItem], date]:
 # 2. DAY PART FILTERING
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Hour ranges for legacy short-form day parts
 DAYPART_HOURS: Dict[str, Tuple[int, int]] = {
-    "breakfast": (6,  10),
-    "lunch":     (11, 16),
-    "afternoon": (15, 16),
-    "dinner":    (17, 23),
-    "all":       (0,  23),
+    "breakfast":  (6,  10),
+    "lunch":      (11, 16),
+    "afternoon":  (15, 16),
+    "dinner":     (17, 23),
+    "late_night": (0,   5),
+    "all":        (0,  23),
+}
+
+# Full carousel-style day_part → (hour_range, day_type_filter)
+# day_type_filter is None (no filter), "weekday", or "weekend"
+_CAROUSEL_DAYPART_MAP: Dict[str, Tuple[Tuple[int, int], Optional[str]]] = {
+    "weekday_breakfast":  ((6,  10), "weekday"),
+    "weekday_lunch":      ((11, 16), "weekday"),
+    "weekday_dinner":     ((17, 23), "weekday"),
+    "weekday_late_night": ((0,   5), "weekday"),
+    "weekend_breakfast":  ((6,  10), "weekend"),
+    "weekend_lunch":      ((11, 16), "weekend"),
+    "weekend_dinner":     ((17, 23), "weekend"),
+    "weekend_late_night": ((0,   5), "weekend"),
 }
 
 
@@ -233,17 +319,32 @@ def filter_orders(
     daypart: str = "all",
     weekday_only: bool = False,
 ) -> List[OrderItem]:
-    """Filter orders by day part and optionally by weekday."""
+    """
+    Filter orders by day part.
+
+    Accepts both legacy short forms ("lunch", "dinner", "all", ...)
+    and carousel-style combined forms ("weekday_lunch", "weekend_dinner", ...).
+    The weekday_only flag is respected for legacy forms only; carousel forms
+    encode the weekday/weekend constraint in the day_part string itself.
+    """
+    if daypart in _CAROUSEL_DAYPART_MAP:
+        (low, high), dtype_filter = _CAROUSEL_DAYPART_MAP[daypart]
+        return [
+            o for o in orders
+            if low <= o.local_hour <= high
+            and (dtype_filter is None or o.day_type == dtype_filter)
+        ]
+
     if daypart not in DAYPART_HOURS:
-        raise ValueError(f"Unknown daypart '{daypart}'. Choose from: {list(DAYPART_HOURS)}")
+        valid = sorted(list(DAYPART_HOURS) + list(_CAROUSEL_DAYPART_MAP))
+        raise ValueError(f"Unknown daypart '{daypart}'. Choose from: {valid}")
 
     low, high = DAYPART_HOURS[daypart]
-    result = [
+    return [
         o for o in orders
         if low <= o.local_hour <= high
         and (not weekday_only or o.day_type == "weekday")
     ]
-    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -598,70 +699,166 @@ def print_results(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. MAIN — 4 SCENARIOS
+# 8. SCENARIO TEMPLATES
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCENARIOS = [
-    {
-        "scenario_label": "Scenario 1: Lunch | Exponential decay (½=90d) | Fuzzy",
-        "daypart": "lunch",
-        "decay_type": "exponential",
-        "half_life_days": 90.0,
-        "match_type": "fuzzy",
-        "ngram_sizes": (1, 2, 3),
-        "weekday_only": False,
-    },
-    {
-        "scenario_label": "Scenario 2: Lunch | Step decay (window=90d) | Exact n-gram",
-        "daypart": "lunch",
-        "decay_type": "step",
-        "half_life_days": 90.0,
-        "match_type": "exact",
-        "ngram_sizes": (1, 2, 3),
-        "weekday_only": False,
-    },
-    {
-        "scenario_label": "Scenario 3: Lunch | No recency | Fuzzy",
-        "daypart": "lunch",
-        "decay_type": "none",
-        "half_life_days": 90.0,
-        "match_type": "fuzzy",
-        "ngram_sizes": (1, 2, 3),
-        "weekday_only": False,
-    },
-    {
-        "scenario_label": "Scenario 4: Dinner | Exponential decay (½=90d) | Fuzzy",
-        "daypart": "dinner",
-        "decay_type": "exponential",
-        "half_life_days": 90.0,
-        "match_type": "fuzzy",
-        "ngram_sizes": (1, 2, 3),
-        "weekday_only": False,
-    },
-]
+def _build_scenarios(daypart: str) -> List[Dict]:
+    """Return 3 scenario configs for the given daypart."""
+    return [
+        {
+            "scenario_label": f"Scenario 1: {daypart} | Exponential decay (½=90d) | Fuzzy",
+            "daypart": daypart,
+            "decay_type": "exponential",
+            "half_life_days": 90.0,
+            "match_type": "fuzzy",
+            "ngram_sizes": (1, 2, 3),
+            "weekday_only": False,
+        },
+        {
+            "scenario_label": f"Scenario 2: {daypart} | Step decay (window=90d) | Exact n-gram",
+            "daypart": daypart,
+            "decay_type": "step",
+            "half_life_days": 90.0,
+            "match_type": "exact",
+            "ngram_sizes": (1, 2, 3),
+            "weekday_only": False,
+        },
+        {
+            "scenario_label": f"Scenario 3: {daypart} | No recency | Fuzzy",
+            "daypart": daypart,
+            "decay_type": "none",
+            "half_life_days": 90.0,
+            "match_type": "fuzzy",
+            "ngram_sizes": (1, 2, 3),
+            "weekday_only": False,
+        },
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Compare recommendation systems A/B/C against order history."
+    )
+    parser.add_argument(
+        "--carousels-csv",
+        metavar="FILE",
+        help=(
+            "Path to the carousels CSV file "
+            "(e.g. 'Natalie Sample Carousels - Full_data.csv'). "
+            "When provided, --orders-csv and --day-part are also required."
+        ),
+    )
+    parser.add_argument(
+        "--orders-csv",
+        metavar="FILE",
+        help="Path to the orders CSV file (e.g. 'Natalie-orders.csv').",
+    )
+    parser.add_argument(
+        "--day-part",
+        metavar="DAY_PART",
+        help=(
+            "Day part to analyse. Carousel-style: weekday_lunch, weekday_dinner, "
+            "weekend_lunch, weekend_dinner, weekday_breakfast, weekend_breakfast, "
+            "weekday_late_night, weekend_late_night. "
+            "Legacy: lunch, dinner, breakfast, all."
+        ),
+    )
+    return parser.parse_args()
 
 
 def main():
+    args = _parse_args()
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    md_path  = os.path.join(base_dir, "sample_recommendation.md")
-    csv_path = os.path.join(base_dir, "Chunlei-orders-2026-03-04.csv")
 
-    # ── Load data ──
-    print("Loading recommendation systems...")
-    systems = parse_md(md_path)
+    # ── Decide mode ──
+    use_carousels = bool(args.carousels_csv)
+
+    if use_carousels:
+        # Validate required companions
+        if not args.orders_csv:
+            raise SystemExit("Error: --orders-csv is required when --carousels-csv is provided.")
+        if not args.day_part:
+            raise SystemExit("Error: --day-part is required when --carousels-csv is provided.")
+
+        carousels_path = args.carousels_csv if os.path.isabs(args.carousels_csv) \
+            else os.path.join(base_dir, args.carousels_csv)
+        orders_path = args.orders_csv if os.path.isabs(args.orders_csv) \
+            else os.path.join(base_dir, args.orders_csv)
+        day_part = args.day_part
+
+        print(f"Loading recommendation systems from carousels CSV (day_part='{day_part}')...")
+        systems = parse_carousels_csv(carousels_path, day_part)
+    else:
+        # Legacy mode: sample_recommendation.md + Chunlei's orders
+        md_path   = os.path.join(base_dir, "sample_recommendation.md")
+        orders_path = os.path.join(base_dir, "Chunlei-orders-2026-03-04.csv")
+        day_part = None  # handled by hardcoded scenarios below
+
+        print("Loading recommendation systems from sample_recommendation.md...")
+        systems = parse_md(md_path)
+
     print(f"  Loaded {len(systems)} systems: {[s.name for s in systems]}")
     for s in systems:
         print(f"    System {s.name}: {len(s.tastes)} tastes")
 
     print("\nLoading order history...")
-    orders, reference_date = parse_csv(csv_path)
+    orders, reference_date = parse_csv(orders_path)
     print(f"  Loaded {len(orders)} order items")
-    print(f"  Date range: {min(o.active_date for o in orders)} → {max(o.active_date for o in orders)}")
+    if orders:
+        print(f"  Date range: {min(o.active_date for o in orders)} → {max(o.active_date for o in orders)}")
     print(f"  Reference date (for recency): {reference_date}")
+
+    # ── Build scenarios ──
+    if use_carousels:
+        scenarios = _build_scenarios(day_part)
+    else:
+        # Original 4-scenario set with different dayparts
+        scenarios = [
+            {
+                "scenario_label": "Scenario 1: Lunch | Exponential decay (½=90d) | Fuzzy",
+                "daypart": "lunch",
+                "decay_type": "exponential",
+                "half_life_days": 90.0,
+                "match_type": "fuzzy",
+                "ngram_sizes": (1, 2, 3),
+                "weekday_only": False,
+            },
+            {
+                "scenario_label": "Scenario 2: Lunch | Step decay (window=90d) | Exact n-gram",
+                "daypart": "lunch",
+                "decay_type": "step",
+                "half_life_days": 90.0,
+                "match_type": "exact",
+                "ngram_sizes": (1, 2, 3),
+                "weekday_only": False,
+            },
+            {
+                "scenario_label": "Scenario 3: Lunch | No recency | Fuzzy",
+                "daypart": "lunch",
+                "decay_type": "none",
+                "half_life_days": 90.0,
+                "match_type": "fuzzy",
+                "ngram_sizes": (1, 2, 3),
+                "weekday_only": False,
+            },
+            {
+                "scenario_label": "Scenario 4: Dinner | Exponential decay (½=90d) | Fuzzy",
+                "daypart": "dinner",
+                "decay_type": "exponential",
+                "half_life_days": 90.0,
+                "match_type": "fuzzy",
+                "ngram_sizes": (1, 2, 3),
+                "weekday_only": False,
+            },
+        ]
 
     # ── Run scenarios ──
     all_scenario_results = []
-    for cfg in SCENARIOS:
+    for cfg in scenarios:
         label, results = run_scenario(systems, orders, reference_date, **cfg)
         all_scenario_results.append((label, results, cfg))
         print_results(
@@ -676,6 +873,7 @@ def main():
         )
 
     # ── Overall summary ──
+    n_scenarios = len(scenarios)
     print(f"\n{'═'*70}")
     print("  OVERALL SUMMARY — Which system wins across scenarios?")
     print(f"{'═'*70}")
@@ -690,11 +888,10 @@ def main():
 
     print(f"\n  {'System':<10} {'Wins':>6}  {'Avg Score':>10}")
     print(f"  {'-'*10} {'-'*6}  {'-'*10}")
-    n_scenarios = len(SCENARIOS)
     sorted_systems = sorted(win_counts.items(), key=lambda x: (-x[1], -score_totals[x[0]]))
     for sys_name, wins in sorted_systems:
         avg = score_totals[sys_name] / n_scenarios
-        print(f"  System {sys_name:<4}  {wins:>5}/4   {avg:>10.4f}")
+        print(f"  System {sys_name:<4}  {wins:>{len(str(n_scenarios))+1}}/{n_scenarios}   {avg:>10.4f}")
 
     best_system = sorted_systems[0][0]
     print(f"\n  ✓ Best overall system: System {best_system}")
