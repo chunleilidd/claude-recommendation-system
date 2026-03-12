@@ -702,12 +702,22 @@ def print_results(
 # 8. SCENARIO TEMPLATES
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_scenarios(daypart: str) -> List[Dict]:
-    """Return 3 scenario configs for the given daypart."""
+def _build_scenarios(recs_daypart: str, orders_daypart: str) -> List[Dict]:
+    """
+    Return 3 scenario configs.
+
+    recs_daypart   — day part used to load recommendations (label only)
+    orders_daypart — day part used to filter orders for scoring
+    """
+    label_suffix = (
+        f"recs={recs_daypart} | orders={orders_daypart}"
+        if orders_daypart != recs_daypart
+        else recs_daypart
+    )
     return [
         {
-            "scenario_label": f"Scenario 1: {daypart} | Exponential decay (½=90d) | Fuzzy",
-            "daypart": daypart,
+            "scenario_label": f"Scenario 1: {label_suffix} | Exponential decay (½=90d) | Fuzzy",
+            "daypart": orders_daypart,
             "decay_type": "exponential",
             "half_life_days": 90.0,
             "match_type": "fuzzy",
@@ -715,8 +725,8 @@ def _build_scenarios(daypart: str) -> List[Dict]:
             "weekday_only": False,
         },
         {
-            "scenario_label": f"Scenario 2: {daypart} | Step decay (window=90d) | Exact n-gram",
-            "daypart": daypart,
+            "scenario_label": f"Scenario 2: {label_suffix} | Step decay (window=90d) | Exact n-gram",
+            "daypart": orders_daypart,
             "decay_type": "step",
             "half_life_days": 90.0,
             "match_type": "exact",
@@ -724,8 +734,8 @@ def _build_scenarios(daypart: str) -> List[Dict]:
             "weekday_only": False,
         },
         {
-            "scenario_label": f"Scenario 3: {daypart} | No recency | Fuzzy",
-            "daypart": daypart,
+            "scenario_label": f"Scenario 3: {label_suffix} | No recency | Fuzzy",
+            "daypart": orders_daypart,
             "decay_type": "none",
             "half_life_days": 90.0,
             "match_type": "fuzzy",
@@ -761,10 +771,23 @@ def _parse_args():
         "--day-part",
         metavar="DAY_PART",
         help=(
-            "Day part to analyse. Carousel-style: weekday_lunch, weekday_dinner, "
+            "Day part used to select recommendations from the carousels CSV. "
+            "Carousel-style: weekday_lunch, weekday_dinner, "
             "weekend_lunch, weekend_dinner, weekday_breakfast, weekend_breakfast, "
             "weekday_late_night, weekend_late_night. "
             "Legacy: lunch, dinner, breakfast, all."
+        ),
+    )
+    parser.add_argument(
+        "--orders-day-part",
+        metavar="DAY_PART",
+        default="all",
+        help=(
+            "Day part used to filter the orders history for scoring. "
+            "Accepts the same values as --day-part, plus 'all' (default) to use "
+            "the entire order history regardless of time of day. "
+            "Example: --day-part weekday_lunch --orders-day-part all  "
+            "scores weekday_lunch recommendations against ALL orders."
         ),
     )
     return parser.parse_args()
@@ -789,6 +812,7 @@ def main():
         orders_path = args.orders_csv if os.path.isabs(args.orders_csv) \
             else os.path.join(base_dir, args.orders_csv)
         day_part = args.day_part
+        orders_day_part = args.orders_day_part  # defaults to "all"
 
         print(f"Loading recommendation systems from carousels CSV (day_part='{day_part}')...")
         systems = parse_carousels_csv(carousels_path, day_part)
@@ -796,7 +820,8 @@ def main():
         # Legacy mode: sample_recommendation.md + Chunlei's orders
         md_path   = os.path.join(base_dir, "sample_recommendation.md")
         orders_path = os.path.join(base_dir, "Chunlei-orders-2026-03-04.csv")
-        day_part = None  # handled by hardcoded scenarios below
+        day_part = None       # handled by hardcoded scenarios below
+        orders_day_part = None
 
         print("Loading recommendation systems from sample_recommendation.md...")
         systems = parse_md(md_path)
@@ -811,10 +836,12 @@ def main():
     if orders:
         print(f"  Date range: {min(o.active_date for o in orders)} → {max(o.active_date for o in orders)}")
     print(f"  Reference date (for recency): {reference_date}")
+    if use_carousels:
+        print(f"  Orders filtered to: {orders_day_part}")
 
     # ── Build scenarios ──
     if use_carousels:
-        scenarios = _build_scenarios(day_part)
+        scenarios = _build_scenarios(day_part, orders_day_part)
     else:
         # Original 4-scenario set with different dayparts
         scenarios = [
