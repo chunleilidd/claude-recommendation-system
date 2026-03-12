@@ -1,41 +1,30 @@
-# Claude Recommendation System
+# Recommendation Comparison System
 
-## Project Structure
+## Overview
+This script evaluates recommendation systems A, B, C against food order history to determine their effectiveness in making relevant food suggestions.
 
-```
-claude-recommendation-system/
-├── data/                # Directory for datasets
-├── src/                 # Source code for the recommendation algorithms
-│   ├── algorithm1.py    # Implementation of Algorithm 1
-│   ├── algorithm2.py    # Implementation of Algorithm 2
-│   └── utils.py         # Utility functions
-├── tests/               # Unit tests for the algorithms
-├── README.md            # Project documentation
-└── requirements.txt     # Project dependencies
-```
+## Quick Start
+To use the script with default settings, simply run:
 
-## Setup Instructions
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/chunleilidd/claude-recommendation-system.git
-   cd claude-recommendation-system
-   ```
-
-2. **Install the required dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Running Recommendation Comparison Code
-
-To run the recommendation comparison code, execute the following command:
 ```bash
-python src/algorithm1.py
-python src/algorithm2.py
+python recommendation_comparison.py
 ```
-You can modify the input parameters in the source files to adjust the comparison settings.
 
----
+## Advanced Mode
+For advanced users, you can specify parameters as follows:
 
-For more information, feel free to check the individual algorithm files or the tests directory to understand how each recommendation algorithm is implemented and tested.
+```bash
+python recommendation_comparison.py --carousels-csv <path_to_carousels.csv> --orders-csv <path_to_orders.csv> --day-part <day_part> --orders-day-part <orders_day_part>
+```
+
+## Detailed Command-Line Arguments
+- `--carousels-csv`: Path to the carousels CSV file.
+- `--orders-csv`: Path to the orders CSV file.
+- `--day-part`: The part of the day (e.g., breakfast, lunch, dinner).
+- `--orders-day-part`: Specific orders' day part for filtering results.
+
+## How It Works
+The script employs a scoring algorithm that ranks the recommendations based on user interactions and historical data. It compares the output from each recommendation system and selects the one with the highest cumulative score.
+
+## Output
+The script produces a report detailing the effectiveness of each recommendation system, including metrics and visualizations of their performance against the food order history.
