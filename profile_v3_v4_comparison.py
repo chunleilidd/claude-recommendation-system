@@ -347,11 +347,16 @@ for row in rows:
     for dp in DAYPARTS:
         d3 = v3_dp(v3, dp)
         d4 = v4_dp(v4, dp)
-        fp3d   = text_to_phrases(d3.get('food_preferences', ''))
-        tp3d   = [d3.get('taste_preference', '')] if d3.get('taste_preference') else []
-        dish4d = parse_dish_prefs(d4.get('dish_preferences', ''))
-        cache['dp'][dp] = {'fp3': fp3d, 'tp3': tp3d, 'dish4': dish4d}
-        for t in fp3d + tp3d + dish4d:
+        fp3d    = text_to_phrases(d3.get('food_preferences', ''))
+        tp3d    = [d3.get('taste_preference', '')] if d3.get('taste_preference') else []
+        dish4d  = parse_dish_prefs(d4.get('dish_preferences', ''))
+        items3d = parse_v3_top_items(v3, dp)
+        items4d = parse_v4_top_items(d4)
+        cache['dp'][dp] = {
+            'fp3': fp3d, 'tp3': tp3d, 'dish4': dish4d,
+            'items3': items3d, 'items4': items4d,
+        }
+        for t in fp3d + tp3d + dish4d + items3d + items4d:
             text_registry.add(t)
 
     row_cache.append(cache)
@@ -397,10 +402,10 @@ food_dish_iou_ov   = [];  food_dish_cov_ov   = []
 food_dish_iou_dp   = defaultdict(list);  food_dish_cov_dp   = defaultdict(list)
 taste_dish_iou_ov  = [];  taste_dish_cov_ov  = []
 taste_dish_iou_dp  = defaultdict(list);  taste_dish_cov_dp  = defaultdict(list)
-items_1g_iou_dp   = defaultdict(list);  items_1g_cov_dp   = defaultdict(list)
-items_2g_iou_dp   = defaultdict(list);  items_2g_cov_dp   = defaultdict(list)
-items_3g_iou_dp   = defaultdict(list);  items_3g_cov_dp   = defaultdict(list)
-items_item_iou_dp = defaultdict(list);  items_item_cov_dp = defaultdict(list)
+items_1g_iou_dp  = defaultdict(list);  items_1g_cov_dp  = defaultdict(list)
+items_2g_iou_dp  = defaultdict(list);  items_2g_cov_dp  = defaultdict(list)
+items_3g_iou_dp  = defaultdict(list);  items_3g_cov_dp  = defaultdict(list)
+items_sem_iou_dp = defaultdict(list);  items_sem_cov_dp = defaultdict(list)
 stores_iou_dp      = defaultdict(list);  stores_cov_dp      = defaultdict(list)
 
 for idx, row in enumerate(rows):
@@ -453,9 +458,9 @@ for idx, row in enumerate(rows):
         if result is not None:
             taste_dish_iou_dp[dp].append(result[0]); taste_dish_cov_dp[dp].append(result[1])
 
-        # 4. top_ordered_items — word 1-gram, 2-gram, 3-gram IOU + coverage
-        items3 = parse_v3_top_items(v3, dp)
-        items4 = parse_v4_top_items(d4)
+        # 4. top_ordered_items — word 1/2/3-gram + semantic IOU + coverage
+        items3 = dp_cache['items3']
+        items4 = dp_cache['items4']
         if items3 or items4:
             for n, iou_dp, cov_dp in [
                 (1, items_1g_iou_dp, items_1g_cov_dp),
@@ -467,10 +472,10 @@ for idx, row in enumerate(rows):
                 if set_iou(g3, g4)      is not None: iou_dp[dp].append(set_iou(g3, g4))
                 if set_coverage(g3, g4) is not None: cov_dp[dp].append(set_coverage(g3, g4))
 
-            ni3 = normalize_items(items3)
-            ni4 = normalize_items(items4)
-            if set_iou(ni3, ni4)      is not None: items_item_iou_dp[dp].append(set_iou(ni3, ni4))
-            if set_coverage(ni3, ni4) is not None: items_item_cov_dp[dp].append(set_coverage(ni3, ni4))
+            result = semantic_soft_iou(items3, items4)
+            if result is not None:
+                items_sem_iou_dp[dp].append(result[0])
+                items_sem_cov_dp[dp].append(result[1])
 
         # 5. store IDs — exact IOU + coverage
         s3 = parse_v3_store_ids(v3, dp)
@@ -573,7 +578,7 @@ def build_cuisine_table(title, note,
     return con, '\n'.join(md)
 
 
-ITEM_WEIGHTS = {'1g': 0.10, '2g': 0.20, '3g': 0.30, 'item': 0.40}
+ITEM_WEIGHTS = {'1g': 0.10, '2g': 0.20, '3g': 0.30, 'sem': 0.40}
 
 
 def weighted_item_score(vals_by_label: dict):
@@ -595,34 +600,34 @@ def weighted_item_score(vals_by_label: dict):
 
 
 def build_items_table():
-    """Word 1/2/3-gram + whole-item + weighted IOU/Coverage table for top_ordered_items."""
+    """Word 1/2/3-gram + semantic + weighted IOU/Coverage table for top_ordered_items."""
     cols = [
-        ('1g',   items_1g_iou_dp,   items_1g_cov_dp),
-        ('2g',   items_2g_iou_dp,   items_2g_cov_dp),
-        ('3g',   items_3g_iou_dp,   items_3g_cov_dp),
-        ('item', items_item_iou_dp, items_item_cov_dp),
+        ('1g',  items_1g_iou_dp,  items_1g_cov_dp),
+        ('2g',  items_2g_iou_dp,  items_2g_cov_dp),
+        ('3g',  items_3g_iou_dp,  items_3g_cov_dp),
+        ('sem', items_sem_iou_dp, items_sem_cov_dp),
     ]
     W = 26
     lines = [
         f"\n{'─'*130}",
-        "4. top_ordered_items  [word n-grams (frozenset, order-invariant), per daypart]",
-        f"  Weights: 1g=0.10  2g=0.20  3g=0.30  item=0.40",
+        "4. top_ordered_items  [word n-grams + semantic, per daypart]",
+        f"  Weights: 1g=0.10  2g=0.20  3g=0.30  sem=0.40",
         f"{'─'*130}",
         f"  {'Level':<{W}}  {'1g IOU':>7}  {'n':>4}  {'1g Cov':>7}  {'n':>4}"
         f"  {'2g IOU':>7}  {'n':>4}  {'2g Cov':>7}  {'n':>4}"
         f"  {'3g IOU':>7}  {'n':>4}  {'3g Cov':>7}  {'n':>4}"
-        f"  {'Item IOU':>8}  {'n':>4}  {'Item Cov':>8}  {'n':>4}"
+        f"  {'Sem IOU':>7}  {'n':>4}  {'Sem Cov':>7}  {'n':>4}"
         f"  {'W IOU':>7}  {'W Cov':>7}",
         f"  {'-'*W}  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}"
         f"  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}"
         f"  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}"
-        f"  {'-'*8}  {'-'*4}  {'-'*8}  {'-'*4}"
+        f"  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}"
         f"  {'-'*7}  {'-'*7}",
     ]
     md = [
-        "### 4. top_ordered_items  [word n-grams, frozenset/order-invariant, per daypart]",
-        "*Weights: 1g=0.10, 2g=0.20, 3g=0.30, item=0.40 (harder match → higher weight)*",
-        "| Level | 1g IOU | n | 1g Cov | n | 2g IOU | n | 2g Cov | n | 3g IOU | n | 3g Cov | n | Item IOU | n | Item Cov | n | W IOU | W Cov |",
+        "### 4. top_ordered_items  [word n-grams + semantic, per daypart]",
+        "*Weights: 1g=0.10, 2g=0.20, 3g=0.30, sem=0.40 (harder match → higher weight)*",
+        "| Level | 1g IOU | n | 1g Cov | n | 2g IOU | n | 2g Cov | n | 3g IOU | n | 3g Cov | n | Sem IOU | n | Sem Cov | n | W IOU | W Cov |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     totals = {lbl: ([], []) for lbl, _, _ in cols}
