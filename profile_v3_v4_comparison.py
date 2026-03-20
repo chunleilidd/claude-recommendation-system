@@ -7,7 +7,7 @@ Compare V3 and V4 customer profiles across five field pairs:
      vs dish_preferences (V4)  — semantic soft-IOU via sentence embeddings
   3. taste_preference (V3)
      vs dish_preferences (V4)  — semantic soft-IOU via sentence embeddings
-  4. top_ordered_items          — word IOU + character 3-gram IOU (per daypart)
+  4. top_ordered_items          — word 1-gram, 2-gram, 3-gram IOU + coverage (per daypart)
   5. top_ordered_store_ids (V3)
      vs top_ordered_stores_ids (V4) — exact ID IOU (per daypart)
 
@@ -22,6 +22,7 @@ import csv
 import json
 import re
 from collections import defaultdict
+from itertools import combinations
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -115,14 +116,27 @@ def daypart_order_count(v4_dp_dict: dict) -> int:
     return int(m.group(1)) if m else 0
 
 
-def tokenize(text: str) -> set:
-    words = re.findall(r'\b[a-z]+\b', text.lower())
-    return {w for w in words if w not in STOP_WORDS and len(w) >= 2}
+def word_ngrams_from_items(items: list, n: int) -> set:
+    """Word n-grams as frozensets from a list of dish/item name strings.
 
+    Each item is tokenised independently (stop words removed), then all
+    size-n combinations of its tokens are added as frozensets.  Using
+    frozensets (unordered) instead of tuples (ordered) means
+    frozenset({'chicken','salad'}) matches both 'chicken salad' and
+    'salad chicken', cleanly handling permutation equivalence without
+    enumerating every ordering.  Words from different items never mix.
 
-def char_ngrams(text: str, n: int = 3) -> set:
-    t = re.sub(r'[^a-z0-9]', '', text.lower())
-    return {t[i:i + n] for i in range(len(t) - n + 1)}
+    n=1 → bag-of-words (frozensets of one word each)
+    n=2 → unordered word pairs
+    n=3 → unordered word triples
+    """
+    result = set()
+    for item in items:
+        tokens = [w for w in re.findall(r'\b[a-z]+\b', item.lower())
+                  if w not in STOP_WORDS and len(w) >= 2]
+        for combo in combinations(tokens, n):
+            result.add(frozenset(combo))
+    return result
 
 
 # ── Cuisine extraction ────────────────────────────────────────────────────────
@@ -368,8 +382,9 @@ food_dish_iou_ov   = [];  food_dish_cov_ov   = []
 food_dish_iou_dp   = defaultdict(list);  food_dish_cov_dp   = defaultdict(list)
 taste_dish_iou_ov  = [];  taste_dish_cov_ov  = []
 taste_dish_iou_dp  = defaultdict(list);  taste_dish_cov_dp  = defaultdict(list)
-items_word_iou_dp  = defaultdict(list);  items_word_cov_dp  = defaultdict(list)
-items_ngram_iou_dp = defaultdict(list);  items_ngram_cov_dp = defaultdict(list)
+items_1g_iou_dp = defaultdict(list);  items_1g_cov_dp = defaultdict(list)
+items_2g_iou_dp = defaultdict(list);  items_2g_cov_dp = defaultdict(list)
+items_3g_iou_dp = defaultdict(list);  items_3g_cov_dp = defaultdict(list)
 stores_iou_dp      = defaultdict(list);  stores_cov_dp      = defaultdict(list)
 
 for idx, row in enumerate(rows):
@@ -422,17 +437,19 @@ for idx, row in enumerate(rows):
         if result is not None:
             taste_dish_iou_dp[dp].append(result[0]); taste_dish_cov_dp[dp].append(result[1])
 
-        # 4. top_ordered_items — word IOU + char 3-gram IOU + coverage
+        # 4. top_ordered_items — word 1-gram, 2-gram, 3-gram IOU + coverage
         items3 = parse_v3_top_items(v3, dp)
         items4 = parse_v4_top_items(d4)
         if items3 or items4:
-            t3, t4 = ' '.join(items3), ' '.join(items4)
-            w3, w4   = tokenize(t3), tokenize(t4)
-            ng3, ng4 = char_ngrams(t3, 3), char_ngrams(t4, 3)
-            if set_iou(w3, w4)   is not None: items_word_iou_dp[dp].append(set_iou(w3, w4))
-            if set_coverage(w3, w4)  is not None: items_word_cov_dp[dp].append(set_coverage(w3, w4))
-            if set_iou(ng3, ng4)  is not None: items_ngram_iou_dp[dp].append(set_iou(ng3, ng4))
-            if set_coverage(ng3, ng4) is not None: items_ngram_cov_dp[dp].append(set_coverage(ng3, ng4))
+            for n, iou_dp, cov_dp in [
+                (1, items_1g_iou_dp, items_1g_cov_dp),
+                (2, items_2g_iou_dp, items_2g_cov_dp),
+                (3, items_3g_iou_dp, items_3g_cov_dp),
+            ]:
+                g3 = word_ngrams_from_items(items3, n)
+                g4 = word_ngrams_from_items(items4, n)
+                if set_iou(g3, g4)      is not None: iou_dp[dp].append(set_iou(g3, g4))
+                if set_coverage(g3, g4) is not None: cov_dp[dp].append(set_coverage(g3, g4))
 
         # 5. store IDs — exact IOU + coverage
         s3 = parse_v3_store_ids(v3, dp)
@@ -536,35 +553,49 @@ def build_cuisine_table(title, note,
 
 
 def build_items_table():
-    """Word + 3-gram IOU/Coverage table for top_ordered_items."""
-    all_wi, all_wc, all_ni, all_nc = [], [], [], []
+    """Word 1/2/3-gram IOU + Coverage table for top_ordered_items."""
+    cols = [
+        ('1g', items_1g_iou_dp, items_1g_cov_dp),
+        ('2g', items_2g_iou_dp, items_2g_cov_dp),
+        ('3g', items_3g_iou_dp, items_3g_cov_dp),
+    ]
     W = 26
-    lines = [f"\n{'─'*90}",
-             "4. top_ordered_items  [word tokens + char 3-grams, per daypart]",
-             f"{'─'*90}",
-             f"  {'Level':<{W}}  {'Wd IOU':>7}  {'n':>4}  {'Wd Cov':>7}  {'n':>4}"
-             f"  {'3g IOU':>7}  {'n':>4}  {'3g Cov':>7}  {'n':>4}",
-             f"  {'-'*W}  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}"
-             f"  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}"]
-    md = ["### 4. top_ordered_items  [word tokens + char 3-grams, per daypart]",
-          "| Level | Wd IOU | n | Wd Cov | n | 3g IOU | n | 3g Cov | n |",
-          "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    lines = [
+        f"\n{'─'*100}",
+        "4. top_ordered_items  [word n-grams (frozenset, order-invariant), per daypart]",
+        f"{'─'*100}",
+        f"  {'Level':<{W}}  {'1g IOU':>7}  {'n':>4}  {'1g Cov':>7}  {'n':>4}"
+        f"  {'2g IOU':>7}  {'n':>4}  {'2g Cov':>7}  {'n':>4}"
+        f"  {'3g IOU':>7}  {'n':>4}  {'3g Cov':>7}  {'n':>4}",
+        f"  {'-'*W}  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}"
+        f"  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}"
+        f"  {'-'*7}  {'-'*4}  {'-'*7}  {'-'*4}",
+    ]
+    md = [
+        "### 4. top_ordered_items  [word n-grams, frozenset/order-invariant, per daypart]",
+        "| Level | 1g IOU | n | 1g Cov | n | 2g IOU | n | 2g Cov | n | 3g IOU | n | 3g Cov | n |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    totals = {lbl: ([], []) for lbl, _, _ in cols}
     for dp in DAYPARTS:
-        wi = items_word_iou_dp.get(dp, []);  wc = items_word_cov_dp.get(dp, [])
-        ni = items_ngram_iou_dp.get(dp, []); nc = items_ngram_cov_dp.get(dp, [])
-        if not wi: continue
-        all_wi.extend(wi); all_wc.extend(wc); all_ni.extend(ni); all_nc.extend(nc)
-        lines.append(f"  {'  '+dp:<{W}}  {fv(wi):>7}  {fn(wi):>4}  {fv(wc):>7}  {fn(wc):>4}"
-                     f"  {fv(ni):>7}  {fn(ni):>4}  {fv(nc):>7}  {fn(nc):>4}")
-        md.append(f"| {dp} | {fv(wi)} | {fn(wi)} | {fv(wc)} | {fn(wc)}"
-                  f" | {fv(ni)} | {fn(ni)} | {fv(nc)} | {fn(nc)} |")
-    if all_wi:
-        lines.append(f"  {'  ALL DAYPARTS':<{W}}  {fv(all_wi):>7}  {fn(all_wi):>4}"
-                     f"  {fv(all_wc):>7}  {fn(all_wc):>4}"
-                     f"  {fv(all_ni):>7}  {fn(all_ni):>4}"
-                     f"  {fv(all_nc):>7}  {fn(all_nc):>4}")
-        md.append(f"| ALL DAYPARTS | {fv(all_wi)} | {fn(all_wi)} | {fv(all_wc)} | {fn(all_wc)}"
-                  f" | {fv(all_ni)} | {fn(all_ni)} | {fv(all_nc)} | {fn(all_nc)} |")
+        row_vals = [(lbl, iou_dp.get(dp, []), cov_dp.get(dp, []))
+                    for lbl, iou_dp, cov_dp in cols]
+        if not row_vals[0][1]: continue
+        for lbl, iv, cv in row_vals:
+            totals[lbl][0].extend(iv); totals[lbl][1].extend(cv)
+        cell = ''.join(f"  {fv(iv):>7}  {fn(iv):>4}  {fv(cv):>7}  {fn(cv):>4}"
+                       for _, iv, cv in row_vals)
+        lines.append(f"  {'  '+dp:<{W}}{cell}")
+        md.append(f"| {dp} |" + '|'.join(f" {fv(iv)} | {fn(iv)} | {fv(cv)} | {fn(cv)} "
+                                          for _, iv, cv in row_vals) + '|')
+    if totals['1g'][0]:
+        cell = ''.join(f"  {fv(totals[lbl][0]):>7}  {fn(totals[lbl][0]):>4}"
+                       f"  {fv(totals[lbl][1]):>7}  {fn(totals[lbl][1]):>4}"
+                       for lbl, _, _ in cols)
+        lines.append(f"  {'  ALL DAYPARTS':<{W}}{cell}")
+        md.append(f"| ALL DAYPARTS |" + '|'.join(
+            f" {fv(totals[lbl][0])} | {fn(totals[lbl][0])} | {fv(totals[lbl][1])} | {fn(totals[lbl][1])} "
+            for lbl, _, _ in cols) + '|')
     return '\n'.join(lines), '\n'.join(md)
 
 
